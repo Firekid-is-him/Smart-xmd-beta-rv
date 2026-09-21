@@ -91,6 +91,7 @@ export async function startBot() {
       startHeartbeat();
       startDisconnectSignalPolling(sock);
       await loadCommands();
+      await sendWelcomeIfDue(sock);
     }
 
     if (connection === "close") {
@@ -171,6 +172,31 @@ function startDisconnectSignalPolling(sock) {
 function stopDisconnectSignalPolling() {
   if (disconnectPollTimer) clearInterval(disconnectPollTimer);
   disconnectPollTimer = null;
+}
+
+async function sendWelcomeIfDue(sock) {
+  let shouldSend;
+  try {
+    const result = await workerApi.shouldSendWelcome();
+    shouldSend = result.shouldSend;
+  } catch (err) {
+    logger.warn({ err: err.message }, "shouldSendWelcome check failed");
+    return;
+  }
+
+  if (!shouldSend) return;
+
+  const ownerJid = sock.user?.id;
+  if (!ownerJid) return;
+
+  try {
+    await sock.sendMessage(ownerJid, {
+      text: "Bot connected successfully. Type .menu for all commands.",
+    });
+    await workerApi.markWelcomeSent();
+  } catch (err) {
+    logger.warn({ err: err.message }, "welcome DM failed");
+  }
 }
 
 export function getCurrentSocket() {

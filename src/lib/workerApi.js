@@ -36,6 +36,9 @@ export const workerApi = {
 
   heartbeat: () => request("/sessions/heartbeat", { method: "POST" }),
 
+  shouldSendWelcome: () => request("/sessions/should-send-welcome"),
+  markWelcomeSent: () => request("/sessions/mark-welcome-sent", { method: "POST" }),
+
   getDisconnectSignal: () => request("/sessions/disconnect-signal"),
   resolveDisconnectSignal: (signalId) =>
     request(`/sessions/disconnect-signal/${signalId}/resolve`, { method: "POST" }),
