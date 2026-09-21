@@ -1,0 +1,16 @@
+services:
+  - type: worker
+    name: smart-xmd-rv
+    env: node
+    plan: free
+    buildCommand: npm install
+    startCommand: npm start
+    envVars:
+      - key: SESSION_ID
+        sync: false
+      - key: FIREKID_KEY
+        sync: false
+      - key: WORKER_URL
+        sync: false
+      - key: LOG_LEVEL
+        value: warn

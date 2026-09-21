@@ -1,0 +1,58 @@
+name: obfuscate-and-publish
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  obfuscate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - run: npm install
+      - run: npm install --no-save javascript-obfuscator
+
+      - run: mkdir -p dist/src
+
+      - name: obfuscate source
+        run: |
+          npx javascript-obfuscator src/index.js --output dist/src/index.js \
+            --compact true \
+            --self-defending true \
+            --string-array true \
+            --string-array-encoding base64 \
+            --control-flow-flattening false \
+            --dead-code-injection false
+
+          npx javascript-obfuscator src/lib --output dist/src/lib \
+            --compact true \
+            --self-defending true \
+            --string-array true \
+            --string-array-encoding base64 \
+            --control-flow-flattening false \
+            --dead-code-injection false
+
+      - name: copy non-source files
+        run: |
+          cp package.json dist/package.json
+          cp render.yaml dist/render.yaml
+
+      - name: push to dist repo
+        env:
+          DIST_REPO_TOKEN: ${{ secrets.DIST_REPO_TOKEN }}
+        run: |
+          cd dist
+          git init
+          git config user.name "firekid-ci"
+          git config user.email "ci@firekid.dev"
+          git remote add origin https://x-access-token:${DIST_REPO_TOKEN}@github.com/Firekid-is-him/smart-xmd-rv-dist.git
+          git checkout -b main
+          git add .
+          git commit -m "build: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          git push --force origin main
