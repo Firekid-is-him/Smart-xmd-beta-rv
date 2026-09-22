@@ -47,6 +47,10 @@ export const workerApi = {
 
   isSudo: (jid) => request(`/sessions/is-sudo?jid=${encodeURIComponent(jid)}`),
 
+  isOwner: (jid) => request(`/bot/is-owner?jid=${encodeURIComponent(jid)}`),
+
+  getPrefixes: () => request("/sessions/prefixes/bot"),
+
   getCommandBundle: () => request("/bot/commands"),
 
   modeCheck: (jid) => request(`/bot/mode-check?jid=${encodeURIComponent(jid)}`),
@@ -57,6 +61,28 @@ export const workerApi = {
   getGroupSettings: (groupJid) => request(`/groups/${encodeURIComponent(groupJid)}/settings`),
   patchGroupSettings: (groupJid, patch) =>
     request(`/groups/${encodeURIComponent(groupJid)}/settings`, { method: "PATCH", body: JSON.stringify(patch) }),
+
+  incrementWarn: (groupJid, memberJid) =>
+    request(`/groups/${encodeURIComponent(groupJid)}/warns/${encodeURIComponent(memberJid)}/increment`, {
+      method: "POST",
+    }),
+  resetWarn: (groupJid, memberJid) =>
+    request(`/groups/${encodeURIComponent(groupJid)}/warns/${encodeURIComponent(memberJid)}/reset`, {
+      method: "POST",
+    }),
+  getWarns: (groupJid) => request(`/groups/${encodeURIComponent(groupJid)}/warns`),
+
+  getEconomy: (jid) => request(`/bot/economy/${encodeURIComponent(jid)}`),
+  patchEconomy: (jid, patch) =>
+    request(`/bot/economy/${encodeURIComponent(jid)}`, { method: "PATCH", body: JSON.stringify(patch) }),
+
+  isBlacklisted: (jid) => request(`/groups/blacklist`).then((r) => r.blacklist.some((b) => b.jid === jid)),
+  addBlacklist: (jid, reason) =>
+    request(`/groups/blacklist`, { method: "POST", body: JSON.stringify({ jid, reason }) }),
+  removeBlacklist: (jid) => request(`/groups/blacklist/${encodeURIComponent(jid)}`, { method: "DELETE" }),
+
+  addSudo: (jid, addedBy) =>
+    request(`/sessions/sudo/bot-add`, { method: "POST", body: JSON.stringify({ jid, addedBy }) }),
 };
 
 export { SESSION_ID, FIREKID_KEY, WORKER_URL };

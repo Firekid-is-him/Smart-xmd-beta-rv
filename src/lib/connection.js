@@ -7,7 +7,7 @@ import pino from "pino";
 import { useRemoteAuthState } from "./remoteAuthState.js";
 import { workerApi } from "./workerApi.js";
 import { loadCommands } from "./commandLoader.js";
-import { handleMessage } from "./handler.js";
+import { handleMessage, resetPrefixCache } from "./handler.js";
 
 const logger = pino({ level: process.env.LOG_LEVEL || "warn" });
 
@@ -90,6 +90,7 @@ export async function startBot() {
       logger.info("Connected.");
       startHeartbeat();
       startDisconnectSignalPolling(sock);
+      resetPrefixCache();
       await loadCommands();
       await sendWelcomeIfDue(sock);
     }

@@ -1,7 +1,22 @@
 import { getCommand, getMessageListeners } from "./commandLoader.js";
 import { workerApi } from "./workerApi.js";
 
-const PREFIX = ".";
+let cachedPrefixes = null;
+
+export function resetPrefixCache() {
+  cachedPrefixes = null;
+}
+
+async function getPrefixes() {
+  if (cachedPrefixes) return cachedPrefixes;
+  try {
+    const result = await workerApi.getPrefixes();
+    cachedPrefixes = result.prefixes?.length ? result.prefixes : ["."];
+  } catch {
+    cachedPrefixes = ["."];
+  }
+  return cachedPrefixes;
+}
 
 function extractText(msg) {
   const m = msg.message;
@@ -28,16 +43,18 @@ export async function handleMessage(sock, msg) {
     }
   }
 
-  if (!text.startsWith(PREFIX)) return;
+  const prefixes = await getPrefixes();
+  const matchedPrefix = prefixes.find((p) => text.startsWith(p));
+  if (!matchedPrefix) return;
 
-  const withoutPrefix = text.slice(PREFIX.length).trim();
+  const withoutPrefix = text.slice(matchedPrefix.length).trim();
   const [rawCommand, ...args] = withoutPrefix.split(/\s+/);
   if (!rawCommand) return;
 
   const commandName = rawCommand.toLowerCase();
 
   if (commandName === "changefilemode") {
-    await handleChangeFileMode(sock, msg, args);
+    await handleChangeFileMode(sock, msg, args, matchedPrefix);
     return;
   }
 
@@ -54,18 +71,18 @@ export async function handleMessage(sock, msg) {
   if (!cmd) return;
 
   try {
-    await cmd.handler(sock, msg, { args, jid, fromJid });
+    await cmd.handler(sock, msg, { args, jid, fromJid, prefix: matchedPrefix, command: commandName });
   } catch (err) {
     console.error(`command "${commandName}" threw:`, err.message);
   }
 }
 
-async function handleChangeFileMode(sock, msg, args) {
+async function handleChangeFileMode(sock, msg, args, prefix) {
   const jid = msg.key.remoteJid;
   const [target, token] = args;
 
   if (!target || !token || (target !== "prod" && target !== "beta")) {
-    await sock.sendMessage(jid, { text: "usage: .changefilemode <prod|beta> <token>" });
+    await sock.sendMessage(jid, { text: `usage: ${prefix}changefilemode <prod|beta> <token>` });
     return;
   }
 
@@ -82,3 +99,4 @@ async function handleChangeFileMode(sock, msg, args) {
   const { loadCommands } = await import("./commandLoader.js");
   await loadCommands();
 }
+

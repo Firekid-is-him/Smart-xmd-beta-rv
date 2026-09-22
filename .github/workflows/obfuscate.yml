@@ -1,9 +1,7 @@
 name: obfuscate-and-publish
 
 on:
-  push:
-    branches:
-      - main
+  workflow_dispatch:
 
 jobs:
   obfuscate:
