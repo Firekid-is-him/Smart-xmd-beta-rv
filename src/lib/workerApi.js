@@ -31,8 +31,8 @@ async function request(path, options = {}) {
 
 export const workerApi = {
   getAuthState: () => request("/bot/session/get").catch((e) => (e.status === 404 ? null : Promise.reject(e))),
-  setAuthState: (creds, keys) =>
-    request("/bot/session/set", { method: "POST", body: JSON.stringify({ creds, keys }) }),
+  setAuthState: (creds, keys, epoch) =>
+    request("/bot/session/set", { method: "POST", body: JSON.stringify({ creds, keys, epoch }) }),
 
   heartbeat: () => request("/sessions/heartbeat", { method: "POST" }),
 

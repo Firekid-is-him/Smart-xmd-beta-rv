@@ -40,6 +40,11 @@ export async function useRemoteAuthState() {
 
   const creds = stored?.creds ? deserialize(stored.creds) : initAuthCreds();
   const keyStore = stored?.keys ? deserialize(stored.keys) : {};
+  // Held in memory and echoed on every write so the Worker can reject a
+  // write from a process that a newer pairing has already superseded
+  // (see bot.ts /session/set). Starts at 0 for a brand new session.
+  let epoch = stored?.epoch ?? 0;
+  let superseded = false;
 
   // Debounce coalesces bursts of writes, but a burst must never be able to
   // outlive the process: `dirty` tracks whether memory has unwritten
@@ -51,11 +56,22 @@ export async function useRemoteAuthState() {
   let inFlight = null;
 
   const persist = async () => {
+    if (superseded) return; // stop writing entirely once epoch-rejected
     dirty = false;
     const payload = { creds: serialize(creds), keys: serialize(keyStore) };
     try {
-      await workerApi.setAuthState(payload.creds, payload.keys);
+      await workerApi.setAuthState(payload.creds, payload.keys, epoch);
     } catch (err) {
+      if (err.status === 409 || err.code === "EPOCH_SUPERSEDED") {
+        // A newer pairing for this phone has replaced our session. Writing
+        // further would risk nothing (the Worker already rejects us), but
+        // continuing to run this socket is pointless and the whole reason
+        // this guard exists — get out rather than limp along.
+        superseded = true;
+        console.error("[auth] epoch superseded, this session is stale — exiting");
+        process.exit(1);
+        return;
+      }
       console.error("[auth] failed to persist creds:", err.message);
       dirty = true; // retry on the next scheduled save or flush
     }
