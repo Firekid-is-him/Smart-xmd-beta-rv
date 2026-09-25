@@ -13,6 +13,15 @@ export async function useRemoteAuthState() {
 
   const creds = stored?.creds ? deserialize(stored.creds) : initAuthCreds();
   const keyStore = stored?.keys ? deserialize(stored.keys) : {};
+  // Held for the lifetime of this closure and echoed back on every save so
+  // the worker's compare-and-swap can detect a stale process (see the
+  // epoch guard in smartmd-worker's /bot/session/set). A fresh pairing
+  // starts a row at epoch 0, so default to 0 when nothing is stored yet.
+  let epoch = typeof stored?.epoch === "number" ? stored.epoch : 0;
+  // Set once the worker reports EPOCH_SUPERSEDED: a newer pairing has
+  // replaced this session, so further writes are pointless and would just
+  // keep hammering the worker with 409s.
+  let superseded = false;
 
   // Debounced but never dropped: a pending save now always actually
   // fires, even if the process reconnects/calls startBot() again before
@@ -34,9 +43,15 @@ export async function useRemoteAuthState() {
   let pendingSave = Promise.resolve();
 
   const doSave = () => {
+    if (superseded) return pendingSave;
     pendingSave = workerApi
-      .setAuthState(serialize(creds), serialize(keyStore))
+      .setAuthState(serialize(creds), serialize(keyStore), epoch)
       .catch((err) => {
+        if (err.code === "EPOCH_SUPERSEDED") {
+          superseded = true;
+          console.error("[auth] session superseded by a newer pairing, stopping writes.");
+          return;
+        }
         console.error("[auth] failed to persist creds:", err.message);
       });
     return pendingSave;
