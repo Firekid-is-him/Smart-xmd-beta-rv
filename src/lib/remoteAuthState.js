@@ -8,100 +8,57 @@ function deserialize(value) {
   return JSON.parse(JSON.stringify(value), BufferJSON.reviver);
 }
 
-// Registered once for the process, not once per useRemoteAuthState() call.
-// startBot() re-invokes useRemoteAuthState() on every reconnect, and
-// process.on listeners are never auto-replaced, so registering inside the
-// function would leak one SIGTERM/SIGINT/beforeExit listener per reconnect
-// and risk multiple stale sessions racing to flush on shutdown.
-let activeFlush = null;
-let shutdownHandlersRegistered = false;
-
-function registerShutdownHandlersOnce() {
-  if (shutdownHandlersRegistered) return;
-  shutdownHandlersRegistered = true;
-
-  const runFlush = async () => {
-    if (activeFlush) await activeFlush().catch(() => {});
-  };
-
-  for (const sig of ["SIGTERM", "SIGINT"]) {
-    process.on(sig, async () => {
-      await runFlush();
-      process.exit(0);
-    });
-  }
-  process.on("beforeExit", () => {
-    runFlush();
-  });
-}
-
 export async function useRemoteAuthState() {
   const stored = await workerApi.getAuthState();
 
   const creds = stored?.creds ? deserialize(stored.creds) : initAuthCreds();
   const keyStore = stored?.keys ? deserialize(stored.keys) : {};
-  // Held in memory and echoed on every write so the Worker can reject a
-  // write from a process that a newer pairing has already superseded
-  // (see bot.ts /session/set). Starts at 0 for a brand new session.
-  let epoch = stored?.epoch ?? 0;
-  let superseded = false;
 
-  // Debounce coalesces bursts of writes, but a burst must never be able to
-  // outlive the process: `dirty` tracks whether memory has unwritten
-  // changes, and `flush()` is both what the timer calls and what shutdown
-  // handlers call to force an immediate, awaited write. `inFlight` prevents
-  // two overlapping writes to the same row from racing.
+  // Debounced but never dropped: a pending save now always actually
+  // fires, even if the process reconnects/calls startBot() again before
+  // the debounce window elapses. Previously, each new startBot() run
+  // created a fresh closure over a new keyStore object with no
+  // reference to whatever save timer a PRIOR run's closure had pending -
+  // if a reconnect happened inside that 500ms window (exactly what
+  // "attempt: 2" in the logs indicates was happening), the old timer's
+  // keyStore was abandoned with its scheduled write never sent, silently
+  // losing every key generated since the last successful save. That
+  // showed up later as "failed to find key to decode mutation" / "Bad
+  // MAC" once WhatsApp's servers used a key this bot never actually
+  // persisted.
+  //
+  // pendingSave now tracks the in-flight write itself (not just a
+  // timer), and flush() lets callers await it directly before doing
+  // anything that might tear down this closure.
   let saveTimer = null;
-  let dirty = false;
-  let inFlight = null;
+  let pendingSave = Promise.resolve();
 
-  const persist = async () => {
-    if (superseded) return; // stop writing entirely once epoch-rejected
-    dirty = false;
-    const payload = { creds: serialize(creds), keys: serialize(keyStore) };
-    try {
-      await workerApi.setAuthState(payload.creds, payload.keys, epoch);
-    } catch (err) {
-      if (err.status === 409 || err.code === "EPOCH_SUPERSEDED") {
-        // A newer pairing for this phone has replaced our session. Writing
-        // further would risk nothing (the Worker already rejects us), but
-        // continuing to run this socket is pointless and the whole reason
-        // this guard exists — get out rather than limp along.
-        superseded = true;
-        console.error("[auth] epoch superseded, this session is stale — exiting");
-        process.exit(1);
-        return;
-      }
-      console.error("[auth] failed to persist creds:", err.message);
-      dirty = true; // retry on the next scheduled save or flush
-    }
+  const doSave = () => {
+    pendingSave = workerApi
+      .setAuthState(serialize(creds), serialize(keyStore))
+      .catch((err) => {
+        console.error("[auth] failed to persist creds:", err.message);
+      });
+    return pendingSave;
+  };
+
+  const scheduleSave = () => {
+    if (saveTimer) clearTimeout(saveTimer);
+    saveTimer = setTimeout(() => {
+      saveTimer = null;
+      doSave();
+    }, 500);
   };
 
   const flush = async () => {
     if (saveTimer) {
       clearTimeout(saveTimer);
       saveTimer = null;
+      await doSave();
+    } else {
+      await pendingSave;
     }
-    if (inFlight) await inFlight.catch(() => {});
-    if (!dirty) return;
-    inFlight = persist();
-    await inFlight;
-    inFlight = null;
   };
-
-  const scheduleSave = () => {
-    dirty = true;
-    if (saveTimer) clearTimeout(saveTimer);
-    saveTimer = setTimeout(() => {
-      saveTimer = null;
-      inFlight = persist().finally(() => {
-        inFlight = null;
-      });
-    }, 500);
-  };
-
-  activeFlush = flush;
-  registerShutdownHandlersOnce();
 
   const keys = {
     get: async (type, ids) => {
@@ -130,6 +87,9 @@ export async function useRemoteAuthState() {
     saveCreds: async () => {
       scheduleSave();
     },
+    // Callers that are about to tear this session down (planned
+    // disconnect, reconnect-with-new-socket, process exit) should await
+    // this first so a key generated in the last 500ms isn't lost.
     flush,
   };
 }

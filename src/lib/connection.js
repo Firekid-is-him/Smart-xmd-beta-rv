@@ -41,7 +41,7 @@ function shouldProcessMessage(msg) {
 }
 
 export async function startBot() {
-  const { state, saveCreds } = await useRemoteAuthState();
+  const { state, saveCreds, flush } = await useRemoteAuthState();
   const { version } = await fetchLatestBaileysVersion();
 
   const sock = makeWASocket({
@@ -98,6 +98,16 @@ export async function startBot() {
     if (connection === "close") {
       stopHeartbeat();
       stopDisconnectSignalPolling();
+
+      // Flush any debounced-but-not-yet-sent auth state write before
+      // this closure (and its keyStore) gets abandoned by a reconnect.
+      // Without this, a key Baileys generated and used in the last
+      // 500ms before the socket closed could be lost entirely if
+      // startBot() creates a fresh useRemoteAuthState() before the old
+      // save timer fires - the next connection then has no record of a
+      // key WhatsApp's servers already saw in use, surfacing later as
+      // "failed to find key to decode mutation" / "Bad MAC".
+      await flush().catch((err) => logger.warn({ err: err.message }, "auth state flush on close failed"));
 
       const statusCode = lastDisconnect?.error?.output?.statusCode;
 
