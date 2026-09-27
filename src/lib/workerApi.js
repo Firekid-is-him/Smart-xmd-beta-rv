@@ -87,6 +87,11 @@ export const workerApi = {
 
   addSudo: (jid, addedBy) =>
     request(`/sessions/sudo/bot-add`, { method: "POST", body: JSON.stringify({ jid, addedBy }) }),
+  listSudo: () => request("/sessions/sudo/bot-list"),
+  removeSudo: (jid) => request("/sessions/sudo/bot-remove", { method: "POST", body: JSON.stringify({ jid }) }),
+
+  setBotMode: (botMode) => request("/sessions/bot-mode", { method: "POST", body: JSON.stringify({ botMode }) }),
+  getBotMode: () => request("/sessions/bot-mode"),
 };
 
 export { SESSION_ID, FIREKID_KEY, WORKER_URL };
