@@ -2,6 +2,7 @@ import { writeFile, mkdir, rm, symlink } from "fs/promises";
 import { join, dirname } from "path";
 import { tmpdir } from "os";
 import { fileURLToPath } from "url";
+import { createHash } from "crypto";
 import pino from "pino";
 import { workerApi } from "./workerApi.js";
 
@@ -17,6 +18,27 @@ const aliases = new Map();
 const categories = new Map();
 const messageListeners = [];
 
+// Every reload previously re-imported EVERY command file as a brand-new
+// module instance (the `?v=${Date.now()}` cache-buster on every single
+// file), because ESM dynamic import() results are permanently retained by
+// Node — there's no equivalent of delete require.cache[...] for ESM, so
+// every one of those old instances just leaks for the life of the
+// process. There's no way to fully eliminate this (Node genuinely has no
+// module-unload API), but it doesn't have to apply to files that didn't
+// change: this map remembers each flattened file's last-imported content
+// hash, and importBundle below only cache-busts (creates a new instance
+// of) files whose hash actually changed since the previous load. An
+// unchanged file gets imported with a stable, hash-based query string, so
+// Node's own module cache (keyed by the resolved URL) returns the
+// already-loaded instance instead of minting a new one — shrinking the
+// leak from "every file, every reload" to "only what was actually edited,
+// once per edit".
+const lastImportedHash = new Map();
+
+function hashContent(content) {
+  return createHash("sha1").update(content).digest("hex").slice(0, 12);
+}
+
 function patchSource(content, category) {
   let src = content;
 
@@ -28,6 +50,16 @@ function patchSource(content, category) {
   const WORKER_API = join(__dir, "workerApi.js");
   src = src.replace(/from\s+['"]\.\.\/\.\.\/src\/lib\/workerApi\.js['"]/g, `from '${WORKER_API}'`);
 
+  // Lets a command (system.js's .menu/.help) introspect the loaded command
+  // set — getCategories/getAllCommands/getCommand — via the same live
+  // module instance this file itself populates. Not circular in the
+  // ES-module-cycle sense: command files are dynamically import()ed here
+  // only after this module has already finished executing and its
+  // module-level Maps are populated, so the imported getters read live,
+  // already-populated state, not a half-initialized module.
+  const COMMAND_LOADER = join(__dir, "commandLoader.js");
+  src = src.replace(/from\s+['"]\.\.\/\.\.\/src\/lib\/commandLoader\.js['"]/g, `from '${COMMAND_LOADER}'`);
+
   src = src.replace(
     /from\s+['"]\.\/([\w.-]+\.js)['"]/g,
     (_, relFile) => `from '${join(TMP, category + "_" + relFile)}'`
@@ -37,7 +69,8 @@ function patchSource(content, category) {
 }
 
 async function importBundle(bundle, tag) {
-  if (!bundle) return;
+  const failures = [];
+  if (!bundle) return failures;
 
   const fileMap = [];
   for (const [relPath, content] of Object.entries(bundle)) {
@@ -49,12 +82,28 @@ async function importBundle(bundle, tag) {
     const patched = patchSource(content, category);
 
     await writeFile(filePath, patched, "utf8");
-    fileMap.push({ relPath, category, filePath });
+    // Hashed on the patched content (what's actually written to disk and
+    // imported), not the raw bundle content — patchSource's output is
+    // what determines whether the importable module actually changed.
+    fileMap.push({ relPath, category, filePath, hash: hashContent(patched) });
   }
 
-  for (const { relPath, category, filePath } of fileMap) {
+  for (const { relPath, category, filePath, hash } of fileMap) {
     try {
-      const mod = await import(`${filePath}?v=${Date.now()}`);
+      const previousHash = lastImportedHash.get(filePath);
+      // Same content as last time this file was imported: reuse the
+      // stable hash as the query string, so Node's module cache (keyed by
+      // resolved URL, query string included) returns the existing module
+      // instance instead of creating a new one. Only a genuine content
+      // change gets a query string that differs from last time, which is
+      // the only case where a new instance — and a small permanent leak —
+      // is actually unavoidable.
+      const mod = await import(`${filePath}?v=${hash}`);
+      if (previousHash && previousHash !== hash) {
+        logger.info({ relPath }, "command file changed, reimported");
+      }
+      lastImportedHash.set(filePath, hash);
+
       const exported = mod.default;
       if (!exported) continue;
 
@@ -91,12 +140,26 @@ async function importBundle(bundle, tag) {
         for (const alias of allAliases) aliases.set(alias.toLowerCase(), main);
       }
     } catch (err) {
+      // Previously only logged server-side (pino), so a typo in a
+      // just-added command file would silently drop that file's commands
+      // with no feedback anywhere the person could actually see — the
+      // whole point of not needing to restart-and-check-logs for .reload
+      // is defeated if failures still only show up in server logs.
       logger.error({ relPath, err: err.message }, "command file failed to load");
+      failures.push({ file: relPath, error: err.message });
     }
   }
+
+  return failures;
 }
 
 export async function loadCommands() {
+  // Snapshot before clearing, so a caller (specifically .reload) can diff
+  // against what's loaded afterward and report what's actually new,
+  // rather than just a total count that doesn't say whether anything
+  // changed.
+  const previousNames = new Set(commands.keys());
+
   commands.clear();
   aliases.clear();
   categories.clear();
@@ -109,16 +172,40 @@ export async function loadCommands() {
   await writeFile(join(TMP, "package.json"), '{"type":"module"}', "utf8");
   await symlink(NODE_MODULES, join(TMP, "node_modules"), "dir").catch(() => {});
 
-  await importBundle(bundle.prodBundle, "prod");
+  // Three-way, matching sessions.file_mode / getCommandBundle's own
+  // three-way split on the worker+pairing-server side:
+  // - "prod": bundle.prodBundle is the only thing populated, load it
+  // - "beta": bundle.prodBundle is null (pairing-server's
+  //   getCommandBundle deliberately never reads prod dir in this mode),
+  //   so prod commands genuinely don't exist in this process at all —
+  //   not just hidden from the menu
+  // - "both": both populated, prod loads first, beta loads second and
+  //   overrides same-named commands (importBundle's existing override
+  //   logic, unchanged) — this is what "beta" used to mean before the
+  //   three-way split
+  const failures = [];
+  if (bundle.prodBundle) {
+    failures.push(...(await importBundle(bundle.prodBundle, "prod")));
+  }
 
-  if (bundle.fileMode === "beta" && bundle.betaBundle) {
-    await importBundle(bundle.betaBundle, "beta");
+  if (bundle.betaBundle) {
+    failures.push(...(await importBundle(bundle.betaBundle, "beta")));
   }
 
   logger.info(
     { commands: commands.size, categories: categories.size, fileMode: bundle.fileMode },
     "commands loaded"
   );
+
+  const newNames = [...commands.keys()].filter((name) => !previousNames.has(name));
+
+  return {
+    totalCommands: commands.size,
+    totalCategories: categories.size,
+    fileMode: bundle.fileMode,
+    newCommands: newNames,
+    failures,
+  };
 }
 
 export function getCommand(name) {
