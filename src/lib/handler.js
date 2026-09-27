@@ -139,8 +139,13 @@ async function handleChangeFileMode(sock, msg, args, prefix) {
   const jid = msg.key.remoteJid;
   const [target, token] = args;
 
-  if (!target || !token || (target !== "prod" && target !== "beta")) {
-    await sock.sendMessage(jid, { text: `usage: ${prefix}changefilemode <prod|beta> <token>` });
+  // Three-way: "beta" now genuinely means beta-only (prod commands don't
+  // load at all, not just hidden from the menu); "prod/beta" loads both,
+  // prod first then beta layered on top overriding same-named commands.
+  const normalizedTarget = target === "prod/beta" ? "both" : target;
+
+  if (!normalizedTarget || !token || !["prod", "beta", "both"].includes(normalizedTarget)) {
+    await sock.sendMessage(jid, { text: `usage: ${prefix}changefilemode <prod|beta|prod/beta> <token>` });
     return;
   }
 
@@ -151,8 +156,9 @@ async function handleChangeFileMode(sock, msg, args, prefix) {
     return;
   }
 
-  await workerApi.setFileMode(target);
-  await sock.sendMessage(jid, { text: `file mode set to ${target}, reloading commands` });
+  await workerApi.setFileMode(normalizedTarget);
+  const label = normalizedTarget === "both" ? "prod+beta" : normalizedTarget;
+  await sock.sendMessage(jid, { text: `file mode set to ${label}, reloading commands` });
 
   const { loadCommands } = await import("./commandLoader.js");
   await loadCommands();
